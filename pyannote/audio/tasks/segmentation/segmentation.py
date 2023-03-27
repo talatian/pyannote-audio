@@ -30,7 +30,7 @@ import torch
 import torch.nn.functional
 from matplotlib import pyplot as plt
 from pyannote.core import SlidingWindow
-from pyannote.database import Protocol
+from pyannote.database.protocol import SpeakerDiarizationProtocol
 from pytorch_lightning.loggers import MLFlowLogger, TensorBoardLogger
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
 from torchmetrics import Metric
@@ -58,7 +58,7 @@ class Segmentation(SegmentationTaskMixin, Task):
 
     Parameters
     ----------
-    protocol : Protocol
+    protocol : SpeakerDiarizationProtocol
         pyannote.database protocol
     duration : float, optional
         Chunks duration. Defaults to 2s.
@@ -121,7 +121,7 @@ class Segmentation(SegmentationTaskMixin, Task):
 
     def __init__(
         self,
-        protocol: Protocol,
+        protocol: SpeakerDiarizationProtocol,
         duration: float = 2.0,
         max_speakers_per_chunk: int = None,
         max_speakers_per_frame: int = None,
@@ -149,6 +149,9 @@ class Segmentation(SegmentationTaskMixin, Task):
             augmentation=augmentation,
             metric=metric,
         )
+
+        if not isinstance(protocol, SpeakerDiarizationProtocol):
+            raise ValueError("Segmentation task requires a SpeakerDiarizationProtocol.")
 
         # deprecation warnings
         if max_speakers_per_chunk is None and max_num_speakers is not None:
