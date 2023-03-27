@@ -228,6 +228,7 @@ class SegmentationTaskMixin:
 
         if domain_key is not None:
             train = [f for f in train if f[domain_key] == domain_value]
+        # turn annotated duration into a probability distribution
 
         while True:
 
