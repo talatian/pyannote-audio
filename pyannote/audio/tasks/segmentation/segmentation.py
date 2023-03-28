@@ -29,9 +29,10 @@ import numpy as np
 import torch
 import torch.nn.functional
 from matplotlib import pyplot as plt
-from pyannote.core import SlidingWindow
 from pyannote.database.protocol import SpeakerDiarizationProtocol
+from pyannote.database.protocol.protocol import Subset
 from pytorch_lightning.loggers import MLFlowLogger, TensorBoardLogger
+from rich.progress import track
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
 from torchmetrics import Metric
 from typing_extensions import Literal
@@ -51,6 +52,8 @@ from pyannote.audio.torchmetrics import (
 )
 from pyannote.audio.utils.loss import binary_cross_entropy, mse_loss, nll_loss
 from pyannote.audio.utils.permutation import permutate
+
+Subsets = list(Subset.__args__)
 
 
 class Segmentation(SegmentationTaskMixin, Task):
@@ -83,8 +86,8 @@ class Segmentation(SegmentationTaskMixin, Task):
         Defaults to 0. (i.e. no warm-up).
     balance: str, optional
         When provided, training samples are sampled uniformly with respect to that key.
-        For instance, setting `balance` to "uri" will make sure that each file will be
-        equally represented in the training samples.
+        For instance, setting `balance` to "database" will make sure that each database
+        will be equally represented in the training samples.
     weight: str, optional
         When provided, use this key as frame-wise weight in loss function.
     batch_size : int, optional
@@ -186,36 +189,73 @@ class Segmentation(SegmentationTaskMixin, Task):
 
         if self.max_speakers_per_chunk is None:
 
-            # TODO: optimize this
+            training = self.metadata["subset"] == Subsets.index("train")
 
-            # slide a window (with 1s step) over the whole training set
-            # and keep track of the number of speakers in each location
-            num_speakers = []
-            for file in self._train:
-                start = file["annotated"][0].start
-                end = file["annotated"][-1].end
-                window = SlidingWindow(
-                    start=start,
-                    end=end,
-                    duration=self.duration,
-                    step=1.0,
-                )
-                for chunk in window:
-                    num_speakers.append(len(file["annotation"].crop(chunk).labels()))
+            num_unique_speakers = []
+            progress_description = f"Estimating maximum number of speakers per {self.duration:g}s chunk in the training set"
+            for file_id in track(
+                np.where(training)[0], description=progress_description
+            ):
+
+                annotations = self.annotations[
+                    np.where(self.annotations["file_id"] == file_id)[0]
+                ]
+                annotated_regions = self.annotated_regions[
+                    np.where(self.annotated_regions["file_id"] == file_id)[0]
+                ]
+                for region in annotated_regions:
+                    # find annotations within current region
+                    region_start = region["start"]
+                    region_end = region["end"]
+                    region_annotations = annotations[
+                        np.where(
+                            (annotations["start"] >= region_start)
+                            * (annotations["end"] <= region_end)
+                        )[0]
+                    ]
+
+                    for window_start in np.arange(
+                        region_start, region_end - self.duration, 0.25 * self.duration
+                    ):
+                        window_end = window_start + self.duration
+                        window_annotations = region_annotations[
+                            np.where(
+                                (region_annotations["start"] <= window_end)
+                                * (region_annotations["end"] >= window_start)
+                            )[0]
+                        ]
+                        num_unique_speakers.append(
+                            len(np.unique(window_annotations["file_label_idx"]))
+                        )
 
             # because there might a few outliers, estimate the upper bound for the
-            # number of speakers as the 99th percentile
+            # number of speakers as the 97th percentile
 
-            num_speakers, counts = zip(*list(Counter(num_speakers).items()))
+            num_speakers, counts = zip(*list(Counter(num_unique_speakers).items()))
             num_speakers, counts = np.array(num_speakers), np.array(counts)
 
             sorting_indices = np.argsort(num_speakers)
             num_speakers = num_speakers[sorting_indices]
             counts = counts[sorting_indices]
 
+            ratios = np.cumsum(counts) / np.sum(counts)
+
+            for k, ratio in zip(num_speakers, ratios):
+                if k == 0:
+                    print(f"   - {ratio:7.2%} of all chunks contain no speech at all.")
+                elif k == 1:
+                    print(f"   - {ratio:7.2%} contain 1 speaker or less")
+                else:
+                    print(f"   - {ratio:7.2%} contain {k} speakers or less")
+
             self.max_speakers_per_chunk = max(
                 2,
-                num_speakers[np.where(np.cumsum(counts) / np.sum(counts) > 0.99)[0][0]],
+                num_speakers[np.where(ratios > 0.97)[0][0]],
+            )
+
+            print(
+                f"Setting `max_speakers_per_chunk` to {self.max_speakers_per_chunk}."
+                f"You can override this value (or avoid this estimation step) by passing `max_speakers_per_chunk={self.max_speakers_per_chunk}` to the task constructor."
             )
 
         if (
@@ -670,7 +710,7 @@ class Segmentation(SegmentationTaskMixin, Task):
         # visualize first 9 validation samples of first batch in Tensorboard/MLflow
 
         if self.specifications.powerset:
-            y = permutated_target_powerset.float().cpu().numpy()
+            y = permutated_target.float().cpu().numpy()
             y_pred = multilabel.cpu().numpy()
         else:
             y = target.float().cpu().numpy()
