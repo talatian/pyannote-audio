@@ -29,8 +29,9 @@ import numpy as np
 import torch
 import torch.nn.functional
 from matplotlib import pyplot as plt
+from pyannote.core import Segment, SlidingWindow, SlidingWindowFeature
 from pyannote.database.protocol import SpeakerDiarizationProtocol
-from pyannote.database.protocol.protocol import Subset
+from pyannote.database.protocol.protocol import Scope, Subset
 from pytorch_lightning.loggers import MLFlowLogger, TensorBoardLogger
 from rich.progress import track
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
@@ -54,6 +55,7 @@ from pyannote.audio.utils.loss import binary_cross_entropy, mse_loss, nll_loss
 from pyannote.audio.utils.permutation import permutate
 
 Subsets = list(Subset.__args__)
+Scopes = list(Scope.__args__)
 
 
 class Segmentation(SegmentationTaskMixin, Task):
@@ -280,6 +282,87 @@ class Segmentation(SegmentationTaskMixin, Task):
             powerset_max_classes=self.max_speakers_per_frame,
             permutation_invariant=True,
         )
+
+    def prepare_chunk(self, file_id: int, start_time: float, duration: float):
+        """Prepare chunk
+
+        Parameters
+        ----------
+        file_id : int
+            File index
+        start_time : float
+            Chunk start time
+        duration : float
+            Chunk duration.
+
+        Returns
+        -------
+        sample : dict
+            Dictionary containing the chunk data with the following keys:
+            - `X`: waveform
+            - `y`: target
+            - `meta`:
+                - `scope`: target scope (0: file, 1: database, 2: global)
+                - `database`: database index
+                - `file`: file index
+        """
+
+        # TODO: make sure that we enough data to recover labels when scope is database or global
+
+        file = self.get_file(file_id)
+
+        # read label scope
+        scope = Scopes[self.metadata[file_id]["scope"]]
+        label_idx = f"{scope}_label_idx"
+
+        chunk = Segment(start_time, start_time + duration)
+
+        sample = dict()
+        sample["X"], _ = self.model.audio.crop(file, chunk, duration=duration)
+
+        # use model introspection to predict how many frames it will output
+        # TODO: this should be cached
+        num_samples = sample["X"].shape[1]
+        num_frames, _ = self.model.introspection(num_samples)
+        resolution = duration / num_frames
+        frames = SlidingWindow(start=0.0, duration=resolution, step=resolution)
+
+        # gather all annotations of current file
+        annotations = self.annotations[self.annotations["file_id"] == file_id]
+
+        # gather all annotations with non-empty intersection with current chunk
+        chunk_annotations = annotations[
+            (annotations["start"] < chunk.end) & (annotations["end"] > chunk.start)
+        ]
+
+        # discretize chunk annotations at model output resolution
+        start = np.maximum(chunk_annotations["start"], chunk.start) - chunk.start
+        start_idx = np.floor(start / resolution).astype(np.int)
+        end = np.minimum(chunk_annotations["end"], chunk.end) - chunk.start
+        end_idx = np.ceil(end / resolution).astype(np.int)
+
+        # get list and number of labels for current scope
+        labels = np.unique(chunk_annotations[label_idx])
+        num_labels = len(labels)
+
+        # initial frame-level targets
+        y = np.zeros((num_frames, num_labels), dtype=np.uint8)
+
+        # map labels to indices
+        mapping = {label: idx for idx, label in enumerate(labels)}
+
+        for c, chunk_annotation in enumerate(chunk_annotations):
+            start, end = start_idx[c], end_idx[c]
+            label = mapping[chunk_annotation[label_idx]]
+            y[start:end, label] = 1
+
+        sample["y"] = SlidingWindowFeature(y, frames, labels=labels)
+
+        metadata = self.metadata[file_id]
+        sample["meta"] = {key: metadata[key] for key in metadata.dtype.names}
+        sample["meta"]["file"] = file_id
+
+        return sample
 
     def adapt_y(self, collated_y: torch.Tensor) -> torch.Tensor:
         """Get speaker diarization targets
@@ -773,6 +856,9 @@ class Segmentation(SegmentationTaskMixin, Task):
                 )
 
         plt.close(fig)
+
+
+SpeakerDiarization = Segmentation
 
 
 def main(protocol: str, subset: str = "test", model: str = "pyannote/segmentation"):
