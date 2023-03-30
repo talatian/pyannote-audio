@@ -58,8 +58,8 @@ Subsets = list(Subset.__args__)
 Scopes = list(Scope.__args__)
 
 
-class Segmentation(SegmentationTaskMixin, Task):
-    """Speaker segmentation
+class SpeakerDiarization(SegmentationTaskMixin, Task):
+    """Speaker diarization
 
     Parameters
     ----------
@@ -189,6 +189,7 @@ class Segmentation(SegmentationTaskMixin, Task):
 
         super().setup(stage=stage)
 
+        # estimate maximum number of speakers per chunk when not provided
         if self.max_speakers_per_chunk is None:
 
             training = self.metadata["subset"] == Subsets.index("train")
@@ -256,7 +257,7 @@ class Segmentation(SegmentationTaskMixin, Task):
             )
 
             print(
-                f"Setting `max_speakers_per_chunk` to {self.max_speakers_per_chunk}."
+                f"Setting `max_speakers_per_chunk` to {self.max_speakers_per_chunk}. "
                 f"You can override this value (or avoid this estimation step) by passing `max_speakers_per_chunk={self.max_speakers_per_chunk}` to the task constructor."
             )
 
@@ -300,21 +301,21 @@ class Segmentation(SegmentationTaskMixin, Task):
         sample : dict
             Dictionary containing the chunk data with the following keys:
             - `X`: waveform
-            - `y`: target
+            - `y`: target as a SlidingWindowFeature instance where y.labels is
+                   in meta.scope space.
             - `meta`:
                 - `scope`: target scope (0: file, 1: database, 2: global)
                 - `database`: database index
                 - `file`: file index
         """
 
-        # TODO: make sure that we enough data to recover labels when scope is database or global
-
         file = self.get_file(file_id)
 
-        # read label scope
-        scope = Scopes[self.metadata[file_id]["scope"]]
-        label_idx = f"{scope}_label_idx"
+        # get label scope
+        label_scope = Scopes[self.metadata[file_id]["scope"]]
+        label_scope_key = f"{label_scope}_label_idx"
 
+        #
         chunk = Segment(start_time, start_time + duration)
 
         sample = dict()
@@ -342,8 +343,11 @@ class Segmentation(SegmentationTaskMixin, Task):
         end_idx = np.ceil(end / resolution).astype(np.int)
 
         # get list and number of labels for current scope
-        labels = np.unique(chunk_annotations[label_idx])
+        labels = list(np.unique(chunk_annotations[label_scope_key]))
         num_labels = len(labels)
+
+        if num_labels > self.max_speakers_per_chunk:
+            pass
 
         # initial frame-level targets
         y = np.zeros((num_frames, num_labels), dtype=np.uint8)
@@ -351,10 +355,11 @@ class Segmentation(SegmentationTaskMixin, Task):
         # map labels to indices
         mapping = {label: idx for idx, label in enumerate(labels)}
 
-        for c, chunk_annotation in enumerate(chunk_annotations):
-            start, end = start_idx[c], end_idx[c]
-            label = mapping[chunk_annotation[label_idx]]
-            y[start:end, label] = 1
+        for start, end, label in zip(
+            start_idx, end_idx, chunk_annotations[label_scope_key]
+        ):
+            mapped_label = mapping[label]
+            y[start:end, mapped_label] = 1
 
         sample["y"] = SlidingWindowFeature(y, frames, labels=labels)
 
@@ -364,42 +369,51 @@ class Segmentation(SegmentationTaskMixin, Task):
 
         return sample
 
-    def adapt_y(self, collated_y: torch.Tensor) -> torch.Tensor:
-        """Get speaker diarization targets
+    def collate_y(self, batch) -> torch.Tensor:
+        """
 
         Parameters
         ----------
-        collated_y : (batch_size, num_frames, num_speakers) tensor
-            One-hot-encoding of current chunk speaker activity:
-                * one_hot_y[b, f, s] = 1 if sth speaker is active at fth frame
-                * one_hot_y[b, f, s] = 0 otherwise.
+        batch : list
+            List of samples to collate.
+            "y" field is expected to be a SlidingWindowFeature.
 
         Returns
         -------
-        y : (batch_size, num_frames, max_speakers_per_chunk) tensor
-            Same as collated_y, except we only keep ``max_speakers_per_chunk`` most
-            talkative speakers (per sample).
+        y : torch.Tensor
+            Collated target tensor of shape (num_frames, self.max_speakers_per_chunk)
+            If one chunk has more than `self.max_speakers_per_chunk` speakers, we keep
+            the max_speakers_per_chunk most talkative ones. If it has less, we pad with
+            zeros (artificial inactive speakers).
         """
 
-        batch_size, num_frames, num_speakers = collated_y.shape
+        collated_y = []
+        for b in batch:
+            y = b["y"].data
+            num_speakers = len(b["y"].labels)
+            if num_speakers > self.max_speakers_per_chunk:
+                # sort speakers in descending talkativeness order
+                indices = np.argsort(-np.sum(y, axis=0), axis=0)
+                # keep only the most talkative speakers
+                y = y[:, indices[: self.max_speakers_per_chunk]]
 
-        # maximum number of active speakers in a chunk
-        max_speakers_per_chunk = max(
-            1, torch.max(torch.sum(torch.sum(collated_y, dim=1) > 0.0, dim=1))
-        )
+                # TODO: we should also sort the speaker labels in the same way
 
-        # sort speakers in descending talkativeness order
-        indices = torch.argsort(torch.sum(collated_y, dim=1), dim=1, descending=True)
+            elif num_speakers < self.max_speakers_per_chunk:
+                # create inactive speakers by zero padding
+                y = np.pad(
+                    y,
+                    ((0, 0), (0, self.max_speakers_per_chunk - num_speakers)),
+                    mode="constant",
+                )
 
-        # keep max_speakers_per_chunk most talkative speakers, for each chunk
-        y = torch.zeros(
-            (batch_size, num_frames, max_speakers_per_chunk), dtype=collated_y.dtype
-        )
-        for b, index in enumerate(indices):
-            for k, i in zip(range(max_speakers_per_chunk), index):
-                y[b, :, k] = collated_y[b, :, i.item()]
+            else:
+                # we have exactly the right number of speakers
+                pass
 
-        return y
+            collated_y.append(y)
+
+        return torch.from_numpy(np.stack(collated_y))
 
     def segmentation_loss(
         self,
@@ -635,15 +649,6 @@ class Segmentation(SegmentationTaskMixin, Task):
             OptimalFalseAlarmRate(),
         ]
 
-    def train__iter__(self):
-        for chunk in super().train__iter__():
-            # TODO: document why this filtering is needed
-            if self.specifications.powerset:
-                if len(chunk["y"].labels) <= self.max_speakers_per_chunk:
-                    yield chunk
-            else:
-                yield chunk
-
     # TODO: no need to compute gradient in this method
     def validation_step(self, batch, batch_idx: int):
         """Compute validation loss and metric
@@ -856,9 +861,6 @@ class Segmentation(SegmentationTaskMixin, Task):
                 )
 
         plt.close(fig)
-
-
-SpeakerDiarization = Segmentation
 
 
 def main(protocol: str, subset: str = "test", model: str = "pyannote/segmentation"):

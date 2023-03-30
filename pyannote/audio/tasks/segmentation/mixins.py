@@ -297,9 +297,13 @@ class SegmentationTaskMixin:
                 # as classes are global by definition
 
                 else:
-                    file_label_idx = (
-                        database_label_idx
-                    ) = global_label_idx = classes.index(label)
+                    try:
+                        file_label_idx = (
+                            database_label_idx
+                        ) = global_label_idx = classes.index(label)
+                    except ValueError:
+                        # skip labels that are not in the list of classes
+                        continue
 
                 annotations.append(
                     (
@@ -525,26 +529,10 @@ class SegmentationTaskMixin:
         return default_collate([b["X"] for b in batch])
 
     def collate_y(self, batch) -> torch.Tensor:
+        return default_collate([b["y"].data for b in batch])
 
-        # TODO: handle scope?
-
-        # gather common set of labels
-        # b["y"] is a SlidingWindowFeature instance
-        labels = sorted(set(itertools.chain(*(b["y"].labels for b in batch))))
-
-        batch_size, num_frames, num_labels = (
-            len(batch),
-            len(batch[0]["y"]),
-            len(labels),
-        )
-        Y = np.zeros((batch_size, num_frames, num_labels), dtype=np.int64)
-
-        for i, b in enumerate(batch):
-            for local_idx, label in enumerate(b["y"].labels):
-                global_idx = labels.index(label)
-                Y[i, :, global_idx] = b["y"].data[:, local_idx]
-
-        return torch.from_numpy(Y)
+    def collate_meta(self, batch) -> torch.Tensor:
+        return default_collate([b["meta"] for b in batch])
 
     def collate_fn(self, batch, stage="train"):
         """Collate function used for most segmentation tasks
@@ -572,6 +560,9 @@ class SegmentationTaskMixin:
         # collate y
         collated_y = self.collate_y(batch)
 
+        # collate metadata
+        collated_meta = self.collate_meta(batch)
+
         # apply augmentation (only in "train" stage)
         self.augmentation.train(mode=(stage == "train"))
         augmented = self.augmentation(
@@ -583,7 +574,7 @@ class SegmentationTaskMixin:
         return {
             "X": augmented.samples,
             "y": self.adapt_y(augmented.targets.squeeze(1)),
-            "meta": default_collate([b["meta"] for b in batch]),
+            "meta": collated_meta,
         }
 
     def train__len__(self):

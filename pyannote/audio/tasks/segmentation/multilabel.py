@@ -23,7 +23,6 @@
 from typing import Dict, List, Optional, Sequence, Text, Tuple, Union
 
 import numpy as np
-import torch
 from pyannote.core import Segment, SlidingWindow, SlidingWindowFeature
 from pyannote.database import Protocol
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
@@ -31,6 +30,8 @@ from torchmetrics import Metric
 
 from pyannote.audio.core.task import Problem, Resolution, Specifications, Task
 from pyannote.audio.tasks.segmentation.mixins import SegmentationTaskMixin
+
+# TODO: update loss function to support missing classes
 
 
 class MultiLabelSegmentation(SegmentationTaskMixin, Task):
@@ -141,22 +142,19 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         sample : dict
             Dictionary containing the chunk data with the following keys:
             - `X`: waveform
-            - `y`: target
+            - `y`: target (see Notes below)
             - `meta`:
                 - `database`: database index
                 - `file`: file index
 
         Notes
         -----
-        y is a trinary matrix with shape (num_classes, num_frames):
+        y is a trinary matrix with shape (num_frames, num_classes):
             -  0: class is inactive
             -  1: class is active
             - -1: we have no idea
 
         """
-
-        # TODO: handle un-annotated classes self.annotated_classes
-        label_idx = 0  # for linting to pass...
 
         file = self.get_file(file_id)
 
@@ -165,8 +163,8 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         sample = dict()
         sample["X"], _ = self.model.audio.crop(file, chunk, duration=duration)
 
-        # use model introspection to predict how many frames it will output
         # TODO: this should be cached
+        # use model introspection to predict how many frames it will output
         num_samples = sample["X"].shape[1]
         num_frames, _ = self.model.introspection(num_samples)
         resolution = duration / num_frames
@@ -186,48 +184,18 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         end = np.minimum(chunk_annotations["end"], chunk.end) - chunk.start
         end_idx = np.ceil(end / resolution).astype(np.int)
 
-        # get list and number of labels for current scope
-        labels = np.unique(chunk_annotations[label_idx])
-        num_labels = len(labels)
-
-        # initial frame-level targets
-        y = np.zeros((num_frames, num_labels), dtype=np.uint8)
-
-        # map labels to indices
-        mapping = {label: idx for idx, label in enumerate(labels)}
-
-        for c, chunk_annotation in enumerate(chunk_annotations):
-            start, end = start_idx[c], end_idx[c]
-            label = mapping[chunk_annotation[label_idx]]
+        # frame-level targets (-1 for un-annotated classes)
+        y = -np.ones((num_frames, len(self.classes)), dtype=np.int8)
+        y[:, self.annotated_classes[file_id]] = 0
+        for start, end, label in zip(
+            start_idx, end_idx, chunk_annotations["global_label_idx"]
+        ):
             y[start:end, label] = 1
 
-        sample["y"] = SlidingWindowFeature(y, frames, labels=labels)
+        sample["y"] = SlidingWindowFeature(y, frames, labels=self.classes)
 
         metadata = self.metadata[file_id]
         sample["meta"] = {key: metadata[key] for key in metadata.dtype.names}
         sample["meta"]["file"] = file_id
 
         return sample
-
-    def collate_y(self, batch) -> torch.Tensor:
-
-        labels = self.specifications.classes
-
-        batch_size, num_frames, num_labels = (
-            len(batch),
-            len(batch[0]["y"]),
-            len(labels),
-        )
-        Y = np.zeros((batch_size, num_frames, num_labels), dtype=np.int64)
-
-        # TODO: mark unannotated classes as -1 instead of 0
-
-        for i, b in enumerate(batch):
-            for local_idx, label in enumerate(b["y"].labels):
-                global_idx = labels.index(label)
-                Y[i, :, global_idx] = b["y"].data[:, local_idx]
-
-        return torch.from_numpy(Y)
-
-    # TODO: add option to give more weights to smaller classes
-    # TODO: add option to balance training samples between classes
