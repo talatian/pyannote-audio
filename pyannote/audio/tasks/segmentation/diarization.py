@@ -157,7 +157,9 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         )
 
         if not isinstance(protocol, SpeakerDiarizationProtocol):
-            raise ValueError("Segmentation task requires a SpeakerDiarizationProtocol.")
+            raise ValueError(
+                "SpeakerDiarization task requires a SpeakerDiarizationProtocol."
+            )
 
         # deprecation warnings
         if max_speakers_per_chunk is None and max_num_speakers is not None:
