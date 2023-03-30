@@ -39,7 +39,6 @@ from torchmetrics import Metric
 from torchmetrics.classification import BinaryAUROC, MulticlassAUROC, MultilabelAUROC
 
 from pyannote.audio.core.task import Problem
-from pyannote.audio.utils.powerset import Powerset
 from pyannote.audio.utils.random import create_rng_for_worker
 
 Subsets = list(Subset.__args__)
@@ -397,13 +396,6 @@ class SegmentationTaskMixin:
         dtype = [("file_id", "i"), ("start", "f"), ("duration", "f")]
         self.validation_chunks = np.array(validation_chunks, dtype=dtype)
 
-    def setup_loss_func(self):
-        if self.specifications.powerset:
-            self.model.powerset = Powerset(
-                len(self.specifications.classes),
-                self.specifications.powerset_max_classes,
-            )
-
     def default_metric(
         self,
     ) -> Union[Metric, Sequence[Metric], Dict[str, Metric]]:
@@ -420,9 +412,6 @@ class SegmentationTaskMixin:
             raise RuntimeError(
                 f"The {self.specifications.problem} problem type hasn't been given a default segmentation metric yet."
             )
-
-    def adapt_y(self, collated_y: torch.Tensor) -> torch.Tensor:
-        return collated_y
 
     def train__iter__helper(self, rng: random.Random, **filters):
         """Iterate over training samples with optional domain filtering
@@ -573,7 +562,7 @@ class SegmentationTaskMixin:
 
         return {
             "X": augmented.samples,
-            "y": self.adapt_y(augmented.targets.squeeze(1)),
+            "y": augmented.targets.squeeze(1),
             "meta": collated_meta,
         }
 

@@ -53,6 +53,7 @@ from pyannote.audio.torchmetrics import (
 )
 from pyannote.audio.utils.loss import binary_cross_entropy, mse_loss, nll_loss
 from pyannote.audio.utils.permutation import permutate
+from pyannote.audio.utils.powerset import Powerset
 
 Subsets = list(Subset.__args__)
 Scopes = list(Scope.__args__)
@@ -283,6 +284,13 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             powerset_max_classes=self.max_speakers_per_frame,
             permutation_invariant=True,
         )
+
+    def setup_loss_func(self):
+        if self.specifications.powerset:
+            self.model.powerset = Powerset(
+                len(self.specifications.classes),
+                self.specifications.powerset_max_classes,
+            )
 
     def prepare_chunk(self, file_id: int, start_time: float, duration: float):
         """Prepare chunk
