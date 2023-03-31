@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Sequence, Text, Tuple, Union
 import numpy as np
 from pyannote.core import Segment, SlidingWindow, SlidingWindowFeature
 from pyannote.database import Protocol
+from pyannote.database.protocol import SegmentationProtocol
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
 from torchmetrics import Metric
 
@@ -94,6 +95,12 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         augmentation: BaseWaveformTransform = None,
         metric: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
     ):
+
+        if not isinstance(protocol, SegmentationProtocol):
+            raise ValueError(
+                f"MultiLabelSegmentation task expects a SegmentationProtocol but you gave {type(protocol)}. "
+            )
+
         super().__init__(
             protocol,
             duration=duration,

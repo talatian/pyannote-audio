@@ -141,7 +141,7 @@ class SegmentationTaskMixin:
             # keep track of list of classes for regular segmentation protocols
             # Different files may be annotated using a different set of classes
             # (e.g. one database for speech/music/noise, and another one for male/female/child)
-            elif isinstance(self.protocol, SegmentationProtocol):
+            if isinstance(self.protocol, SegmentationProtocol):
 
                 if "classes" in file:
                     local_classes = file["classes"]
