@@ -282,7 +282,13 @@ class BaseClustering(Pipeline):
             train_clusters,
             constrained=self.constrained_assignment,
         )
-
+        
+        self.embeddings = embeddings
+        self.train_embeddings = train_embeddings
+        self.train_clusters = train_clusters
+        self.hard_clusters = hard_clusters
+        self.soft_clusters = soft_clusters
+        
         return hard_clusters, soft_clusters
 
 
